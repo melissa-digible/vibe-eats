@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import './App.css'
-import { searchRestaurants, getRestaurantReviews } from './utils/api'
+import { searchRestaurants, getRestaurantReviews, getRecipesForRestaurant } from './utils/api'
 
 const VIBES = [
   { id: 'chill', emoji: '😌', label: 'Chill & Casual', description: 'Just want to relax and enjoy' },
@@ -44,12 +44,23 @@ function App() {
   const [similarRestaurants, setSimilarRestaurants] = useState([])
   const [selectedRestaurant, setSelectedRestaurant] = useState(null)
   const [reviews, setReviews] = useState([])
+  const [recipes, setRecipes] = useState([])
   const [loading, setLoading] = useState(false)
   const [loadingSimilar, setLoadingSimilar] = useState(false)
   const [loadingLocation, setLoadingLocation] = useState(false)
+  const [loadingRecipes, setLoadingRecipes] = useState(false)
+  
+  // Tinder-style swiping state
+  const [swipeMode, setSwipeMode] = useState(false)
+  const [swipeRestaurants, setSwipeRestaurants] = useState([])
+  const [currentSwipeIndex, setCurrentSwipeIndex] = useState(0)
+  const [likedRestaurants, setLikedRestaurants] = useState([])
+  const [maybeRestaurants, setMaybeRestaurants] = useState([])
+  const [dislikedRestaurants, setDislikedRestaurants] = useState([])
+  const [loadingSwipeData, setLoadingSwipeData] = useState(false)
 
   // Get user location
-  const getLocation = () => {
+  const getLocation = (forSwipe = false) => {
     setLoadingLocation(true)
     setLocationError(null)
     
@@ -62,7 +73,6 @@ function App() {
     navigator.geolocation.getCurrentPosition(
       async (position) => {
         const { latitude, longitude } = position.coords
-        // Reverse geocoding to get city/state (simplified - in production use a geocoding service)
         setLocation({
           latitude,
           longitude,
@@ -70,13 +80,166 @@ function App() {
           state: ''
         })
         setLoadingLocation(false)
-        setStep(2)
+        
+        if (forSwipe) {
+          setSwipeMode(true)
+          loadSwipeRestaurants({ latitude, longitude })
+        } else {
+          setStep(2)
+        }
       },
       (error) => {
         setLocationError('Unable to get your location. Please enable location permissions.')
         setLoadingLocation(false)
       }
     )
+  }
+
+  // Load restaurants for swiping
+  const loadSwipeRestaurants = async (location) => {
+    setLoadingSwipeData(true)
+    try {
+      // Load a diverse set of restaurants for swiping
+      const results = await searchRestaurants(location, {
+        cuisine: null, // No filter to get variety
+        price: null,
+        vibe: null,
+        avoidBusy: false
+      })
+      
+      // Filter restaurants that have at least one image (either in photos array or main image)
+      const withPhotos = results.filter(r => {
+        const hasPhotos = r.photos && r.photos.length > 0
+        const hasImage = r.image && r.image !== 'https://via.placeholder.com/400x300' && r.image.trim() !== ''
+        return hasPhotos || hasImage
+      })
+      
+      console.log('Total results:', results.length)
+      console.log('Results with photos/images:', withPhotos.length)
+      console.log('Sample restaurant:', results[0])
+      
+      // If we have restaurants with images, use them
+      if (withPhotos.length > 0) {
+        setSwipeRestaurants(withPhotos.slice(0, 30)) // Limit to 30 for swiping
+        setCurrentSwipeIndex(0)
+        setStep(9) // Step 9 = Tinder-style swiping
+      } else if (results.length > 0) {
+        // If no restaurants with photos, still show restaurants but with fallback images
+        console.log('No restaurants with photos, using all restaurants with fallbacks')
+        setSwipeRestaurants(results.slice(0, 20)) // Take up to 20 restaurants
+        setCurrentSwipeIndex(0)
+        setStep(9)
+      } else {
+        // No restaurants found at all
+        setSwipeRestaurants([])
+        setStep(9)
+      }
+    } catch (error) {
+      console.error('Error loading swipe restaurants:', error)
+      setLocationError('Error loading restaurants. Please try again.')
+      setLoadingSwipeData(false)
+    } finally {
+      setLoadingSwipeData(false)
+    }
+  }
+
+  // Handle swipe actions
+  const handleSwipe = (action) => {
+    if (currentSwipeIndex >= swipeRestaurants.length) return
+    
+    const currentRestaurant = swipeRestaurants[currentSwipeIndex]
+    
+    if (action === 'like') {
+      setLikedRestaurants([...likedRestaurants, currentRestaurant])
+    } else if (action === 'maybe') {
+      setMaybeRestaurants([...maybeRestaurants, currentRestaurant])
+    } else if (action === 'dislike') {
+      setDislikedRestaurants([...dislikedRestaurants, currentRestaurant])
+    }
+    
+    // Move to next restaurant
+    if (currentSwipeIndex < swipeRestaurants.length - 1) {
+      setCurrentSwipeIndex(currentSwipeIndex + 1)
+    } else {
+      // No more restaurants, show recommendations
+      showSwipeRecommendations()
+    }
+  }
+
+  // Show recommendations based on swipe preferences
+  const showSwipeRecommendations = async () => {
+    setLoading(true)
+    try {
+      // Create sets of IDs for filtering
+      const likedIds = new Set(likedRestaurants.map(r => r.id))
+      const maybeIds = new Set(maybeRestaurants.map(r => r.id))
+      const dislikedIds = new Set(dislikedRestaurants.map(r => r.id))
+      
+      // Combine liked and maybe restaurants as our base
+      const preferredRestaurants = [...likedRestaurants, ...maybeRestaurants]
+      
+      // Analyze liked restaurants to determine preferences for finding similar ones
+      const likedCuisines = new Set()
+      const likedPrices = new Set()
+      
+      likedRestaurants.forEach(r => {
+        r.categories?.forEach(cat => {
+          CUISINES.forEach(c => {
+            if (cat.toLowerCase().includes(c.toLowerCase()) || c.toLowerCase().includes(cat.toLowerCase())) {
+              likedCuisines.add(c)
+            }
+          })
+        })
+        if (r.price) {
+          if (r.price.length === 1) likedPrices.add('budget')
+          else if (r.price.length === 2) likedPrices.add('moderate')
+          else if (r.price.length >= 3) likedPrices.add('splurge')
+        }
+      })
+      
+      // Get most common preferences
+      const preferredCuisine = likedCuisines.size > 0 ? Array.from(likedCuisines)[0] : null
+      const preferredPrice = likedPrices.size > 0 ? Array.from(likedPrices)[0] : null
+      
+      // Search for similar restaurants
+      const similarResults = await searchRestaurants(location, {
+        cuisine: preferredCuisine,
+        price: preferredPrice,
+        vibe: null,
+        avoidBusy: false
+      })
+      
+      // Filter out disliked restaurants and duplicates
+      const filtered = similarResults.filter(r => {
+        // Exclude disliked restaurants
+        if (dislikedIds.has(r.id)) return false
+        // Exclude already liked/maybe restaurants (we'll add them separately)
+        if (likedIds.has(r.id) || maybeIds.has(r.id)) return false
+        return true
+      })
+      
+      // Combine: preferred restaurants first, then similar ones
+      // Prioritize liked over maybe, then by rating
+      const sortedPreferred = preferredRestaurants.sort((a, b) => {
+        const aLiked = likedIds.has(a.id) ? 1 : 0
+        const bLiked = likedIds.has(b.id) ? 1 : 0
+        if (aLiked !== bLiked) return bLiked - aLiked
+        return (b.rating || 0) - (a.rating || 0)
+      })
+      
+      // Sort similar restaurants by rating
+      const sortedSimilar = filtered.sort((a, b) => (b.rating || 0) - (a.rating || 0))
+      
+      // Combine: preferred first, then similar (limit similar to top 10)
+      const finalResults = [...sortedPreferred, ...sortedSimilar.slice(0, 10)]
+      
+      setRestaurants(finalResults)
+      setStep(6)
+    } catch (error) {
+      console.error('Error showing recommendations:', error)
+    } finally {
+      setLoading(false)
+    }
   }
 
   // Search for restaurants
@@ -105,6 +268,20 @@ function App() {
   const loadReviews = async (restaurantId) => {
     const restaurantReviews = await getRestaurantReviews(restaurantId)
     setReviews(restaurantReviews)
+  }
+
+  // Load recipes for a restaurant
+  const loadRecipes = async (restaurant) => {
+    setLoadingRecipes(true)
+    try {
+      const restaurantRecipes = await getRecipesForRestaurant(restaurant)
+      setRecipes(restaurantRecipes)
+    } catch (error) {
+      console.error('Error loading recipes:', error)
+      setRecipes([])
+    } finally {
+      setLoadingRecipes(false)
+    }
   }
 
   // Find similar restaurants based on the selected restaurant
@@ -186,6 +363,13 @@ function App() {
     setRestaurants([])
     setSelectedRestaurant(null)
     setReviews([])
+    setRecipes([])
+    setSwipeMode(false)
+    setSwipeRestaurants([])
+    setCurrentSwipeIndex(0)
+    setLikedRestaurants([])
+    setMaybeRestaurants([])
+    setDislikedRestaurants([])
   }
 
   const handleSkip = () => {
@@ -202,6 +386,7 @@ function App() {
   const handleRestaurantClick = (restaurant) => {
     setSelectedRestaurant(restaurant)
     loadReviews(restaurant.id)
+    loadRecipes(restaurant)
     setStep(7)
   }
 
@@ -246,33 +431,41 @@ function App() {
 
         {step === 1 && (
           <div className="step">
-            <h2>📍 Let's find restaurants near you</h2>
+            <h2>How would you like to find your perfect meal? 🍽️</h2>
             <p className="location-info">
-              We'll use your location to find the best restaurants in your area
+              Choose your adventure style
             </p>
+            
+            <div className="experience-options">
+              <button 
+                className="experience-card swipe-option"
+                onClick={() => getLocation(true)}
+                disabled={loadingLocation || loadingSwipeData}
+              >
+                <div className="experience-emoji">💕</div>
+                <h3>Swipe & Discover</h3>
+                <p>Swipe through food photos and we'll learn your taste! Say "Yes!", "Maybe?", or "Nah" to pictures of real dishes.</p>
+                {(loadingLocation || loadingSwipeData) && (
+                  <div className="loading-text">Loading delicious options...</div>
+                )}
+              </button>
+              
+              <button 
+                className="experience-card vibe-option"
+                onClick={() => getLocation(false)}
+                disabled={loadingLocation}
+              >
+                <div className="experience-emoji">✨</div>
+                <h3>Vibe Selection</h3>
+                <p>Tell us your mood and preferences to get personalized recommendations.</p>
+                {loadingLocation && (
+                  <div className="loading-text">Getting your location...</div>
+                )}
+              </button>
+            </div>
+            
             {locationError && (
               <div className="error-message">{locationError}</div>
-            )}
-            <button 
-              className="btn-primary large" 
-              onClick={getLocation}
-              disabled={loadingLocation}
-            >
-              {loadingLocation ? 'Getting Location...' : '📍 Use My Location'}
-            </button>
-            {location && (
-              <div className="location-success">
-                ✅ Location found! Click Next to continue.
-              </div>
-            )}
-            {location && (
-              <button 
-                className="btn-primary" 
-                onClick={handleNext}
-                style={{ marginTop: '1rem' }}
-              >
-                Next →
-              </button>
             )}
           </div>
         )}
@@ -582,6 +775,84 @@ function App() {
                 )}
               </div>
 
+              {/* Recipes Section */}
+              <div className="recipes-section">
+                <h3>🍳 Make It at Home</h3>
+                <p className="recipes-intro">
+                  Want to stay home instead? Try these recipes similar to what {selectedRestaurant.name} serves!
+                </p>
+                {loadingRecipes ? (
+                  <p className="loading-recipes">Loading recipes...</p>
+                ) : recipes.length > 0 ? (
+                  <div className="recipes-grid">
+                    {recipes.map(recipe => (
+                      <div key={recipe.id} className="recipe-card">
+                        <div className="recipe-image-container">
+                          <img 
+                            src={recipe.image} 
+                            alt={recipe.name}
+                            className="recipe-image"
+                            onError={(e) => {
+                              e.target.src = 'https://via.placeholder.com/300x200?text=Recipe'
+                            }}
+                          />
+                          {recipe.category && (
+                            <div className="recipe-category-badge">{recipe.category}</div>
+                          )}
+                        </div>
+                        <div className="recipe-info">
+                          <h4 className="recipe-name">{recipe.name}</h4>
+                          {recipe.area && (
+                            <p className="recipe-area">📍 {recipe.area}</p>
+                          )}
+                          {recipe.ingredients && recipe.ingredients.length > 0 && (
+                            <div className="recipe-ingredients">
+                              <strong>Key Ingredients:</strong>
+                              <ul>
+                                {recipe.ingredients.slice(0, 4).map((ing, idx) => (
+                                  <li key={idx}>
+                                    {ing.measure ? `${ing.measure} ` : ''}{ing.name}
+                                  </li>
+                                ))}
+                                {recipe.ingredients.length > 4 && (
+                                  <li className="more-ingredients">
+                                    +{recipe.ingredients.length - 4} more
+                                  </li>
+                                )}
+                              </ul>
+                            </div>
+                          )}
+                          <div className="recipe-actions">
+                            {recipe.source && (
+                              <a 
+                                href={recipe.source} 
+                                target="_blank" 
+                                rel="noopener noreferrer"
+                                className="recipe-link"
+                              >
+                                View Recipe →
+                              </a>
+                            )}
+                            {recipe.youtube && (
+                              <a 
+                                href={recipe.youtube} 
+                                target="_blank" 
+                                rel="noopener noreferrer"
+                                className="recipe-link youtube-link"
+                              >
+                                Watch Video 🎥
+                              </a>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="no-recipes">No recipes found. Try searching online for "{selectedRestaurant.categories?.[0] || 'recipes'}"!</p>
+                )}
+              </div>
+
               <div className="external-links">
                 {selectedRestaurant.url && selectedRestaurant.url !== '#' && (
                   <a 
@@ -689,6 +960,110 @@ function App() {
               <p>Try adjusting your preferences or search again.</p>
               <button className="btn-primary" onClick={() => setStep(7)}>
                 Back to Restaurant
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Tinder-style Swiping Interface */}
+        {step === 9 && swipeRestaurants.length > 0 && currentSwipeIndex < swipeRestaurants.length && (
+          <div className="step swipe-step">
+            <div className="swipe-header">
+              <h2>💕 Swipe Your Way to Great Food!</h2>
+              <p className="swipe-counter">
+                {currentSwipeIndex + 1} of {swipeRestaurants.length} • 
+                <span className="liked-count"> {likedRestaurants.length} Yes!</span> • 
+                <span className="maybe-count"> {maybeRestaurants.length} Maybe?</span>
+              </p>
+            </div>
+
+            <div className="swipe-container">
+              {currentSwipeIndex < swipeRestaurants.length && (() => {
+                const currentRestaurant = swipeRestaurants[currentSwipeIndex]
+                // Try to get photo from photos array first, then main image, then fallback
+                const currentPhoto = currentRestaurant.photos?.[0] || 
+                                   currentRestaurant.image || 
+                                   'https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?w=800'
+                
+                return (
+                  <div className="swipe-card">
+                    <div className="swipe-image-container">
+                      <img 
+                        src={currentPhoto} 
+                        alt={`Food from ${currentRestaurant.name}`}
+                        className="swipe-image"
+                        onError={(e) => {
+                          // Fallback to a food-related placeholder
+                          e.target.src = 'https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?w=800'
+                        }}
+                      />
+                      <div className="swipe-overlay">
+                        <div className="swipe-restaurant-info">
+                          <h3 className="swipe-restaurant-name">{currentRestaurant.name}</h3>
+                          <div className="swipe-restaurant-details">
+                            {renderStars(currentRestaurant.rating)}
+                            <span className="swipe-rating">{currentRestaurant.rating}</span>
+                            {currentRestaurant.price && (
+                              <span className="swipe-price">{currentRestaurant.price}</span>
+                            )}
+                            {currentRestaurant.categories?.[0] && (
+                              <span className="swipe-category">{currentRestaurant.categories[0]}</span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )
+              })()}
+            </div>
+
+            <div className="swipe-actions">
+              <button 
+                className="swipe-btn dislike-btn"
+                onClick={() => handleSwipe('dislike')}
+              >
+                <span className="swipe-btn-emoji">👎</span>
+                <span className="swipe-btn-label">Nah</span>
+              </button>
+              
+              <button 
+                className="swipe-btn maybe-btn"
+                onClick={() => handleSwipe('maybe')}
+              >
+                <span className="swipe-btn-emoji">🤔</span>
+                <span className="swipe-btn-label">Maybe?</span>
+              </button>
+              
+              <button 
+                className="swipe-btn like-btn"
+                onClick={() => handleSwipe('like')}
+              >
+                <span className="swipe-btn-emoji">❤️</span>
+                <span className="swipe-btn-label">Yes!</span>
+              </button>
+            </div>
+
+            <button 
+              className="btn-primary large show-vibe-btn"
+              onClick={showSwipeRecommendations}
+              disabled={loading}
+            >
+              {loading ? 'Finding Your Perfect Match...' : '✨ Show Me My Vibe'}
+            </button>
+          </div>
+        )}
+
+        {step === 9 && swipeRestaurants.length === 0 && !loadingSwipeData && (
+          <div className="step">
+            <div className="no-results">
+              <h2>No restaurants found</h2>
+              <p>We couldn't find any restaurants in your area. Try the vibe selection option instead or check your location settings.</p>
+              <button className="btn-primary" onClick={() => {
+                setStep(1)
+                setSwipeMode(false)
+              }}>
+                Go Back
               </button>
             </div>
           </div>

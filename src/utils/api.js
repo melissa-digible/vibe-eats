@@ -120,30 +120,37 @@ export async function searchRestaurants(location, preferences = {}) {
       })
     )
 
-    return businessesWithDetails.map(business => ({
-      id: business.id,
-      name: business.name,
-      image: business.image_url,
-      rating: business.rating,
-      reviewCount: business.review_count,
-      price: business.price,
-      location: {
-        address: business.location.display_address.join(', '),
-        city: business.location.city,
-        state: business.location.state
-      },
-      phone: business.display_phone,
-      url: business.url,
-      photos: business.photos || [],
-      menuUrl: business.menuUrl || null,
-      categories: business.categories.map(c => c.title),
-      coordinates: {
-        latitude: business.coordinates.latitude,
-        longitude: business.coordinates.longitude
-      },
-      isClosed: business.is_closed,
-      distance: business.distance
-    }))
+    return businessesWithDetails.map(business => {
+      // Ensure we have at least the main image if photos array is empty
+      const photos = business.photos && business.photos.length > 0 
+        ? business.photos 
+        : (business.image_url ? [business.image_url] : [])
+      
+      return {
+        id: business.id,
+        name: business.name,
+        image: business.image_url || business.image || null,
+        rating: business.rating,
+        reviewCount: business.review_count,
+        price: business.price,
+        location: {
+          address: business.location.display_address.join(', '),
+          city: business.location.city,
+          state: business.location.state
+        },
+        phone: business.display_phone,
+        url: business.url,
+        photos: photos,
+        menuUrl: business.menuUrl || null,
+        categories: business.categories.map(c => c.title),
+        coordinates: {
+          latitude: business.coordinates.latitude,
+          longitude: business.coordinates.longitude
+        },
+        isClosed: business.is_closed,
+        distance: business.distance
+      }
+    })
   } catch (error) {
     console.error('Error fetching restaurants:', error)
     // Fallback to mock data on error
@@ -318,5 +325,237 @@ function getMockReviews() {
       url: '#'
     }
   ]
+}
+
+// Map restaurant categories/cuisines to recipe search terms
+const CUISINE_TO_RECIPE_SEARCH = {
+  'Italian': 'pasta',
+  'Mexican': 'mexican',
+  'Asian': 'asian',
+  'American': 'american',
+  'Mediterranean': 'mediterranean',
+  'Indian': 'indian',
+  'Thai': 'thai',
+  'Japanese': 'japanese',
+  'French': 'french',
+  'BBQ': 'barbecue',
+  'Pizza': 'pizza',
+  'Burgers': 'burger',
+  'Fast Food': 'burger',
+  'Restaurants': 'dinner'
+}
+
+// Get search term from restaurant categories
+function getRecipeSearchTerm(categories) {
+  if (!categories || categories.length === 0) {
+    return 'dinner'
+  }
+
+  // Try to match categories to known cuisines
+  for (const category of categories) {
+    const categoryLower = category.toLowerCase()
+    for (const [cuisine, searchTerm] of Object.entries(CUISINE_TO_RECIPE_SEARCH)) {
+      if (categoryLower.includes(cuisine.toLowerCase()) || cuisine.toLowerCase().includes(categoryLower)) {
+        return searchTerm
+      }
+    }
+  }
+
+  // Default to first category or 'dinner'
+  return categories[0].toLowerCase() || 'dinner'
+}
+
+// Fetch recipes based on restaurant categories
+export async function getRecipesForRestaurant(restaurant) {
+  if (!restaurant || !restaurant.categories) {
+    return getMockRecipes()
+  }
+
+  try {
+    const searchTerm = getRecipeSearchTerm(restaurant.categories)
+    
+    // Try TheMealDB API first (free, no API key needed)
+    try {
+      const response = await fetch(`https://www.themealdb.com/api/json/v1/1/search.php?s=${encodeURIComponent(searchTerm)}`)
+      
+      if (response.ok) {
+        const data = await response.json()
+        if (data.meals && data.meals.length > 0) {
+          // Limit to 6 recipes
+          return data.meals.slice(0, 6).map(meal => ({
+            id: meal.idMeal,
+            name: meal.strMeal,
+            image: meal.strMealThumb,
+            instructions: meal.strInstructions || '',
+            category: meal.strCategory || '',
+            area: meal.strArea || '',
+            ingredients: extractIngredients(meal),
+            source: meal.strSource || `https://www.google.com/search?q=${encodeURIComponent(meal.strMeal + ' recipe')}`,
+            youtube: meal.strYoutube || ''
+          }))
+        }
+      }
+    } catch (error) {
+      console.error('Error fetching from TheMealDB:', error)
+    }
+
+    // Fallback to mock recipes
+    return getMockRecipes(searchTerm)
+  } catch (error) {
+    console.error('Error fetching recipes:', error)
+    return getMockRecipes()
+  }
+}
+
+// Extract ingredients from TheMealDB meal object
+function extractIngredients(meal) {
+  const ingredients = []
+  for (let i = 1; i <= 20; i++) {
+    const ingredient = meal[`strIngredient${i}`]
+    const measure = meal[`strMeasure${i}`]
+    if (ingredient && ingredient.trim()) {
+      ingredients.push({
+        name: ingredient.trim(),
+        measure: measure ? measure.trim() : ''
+      })
+    }
+  }
+  return ingredients
+}
+
+// Mock recipes for fallback
+function getMockRecipes(cuisine = 'dinner') {
+  const mockRecipes = {
+    italian: [
+      {
+        id: 'mock-1',
+        name: 'Classic Spaghetti Carbonara',
+        image: 'https://images.unsplash.com/photo-1621996346565-e3dbc646d9a9?w=600',
+        category: 'Italian',
+        area: 'Italian',
+        instructions: 'Cook pasta, mix with eggs, cheese, and pancetta. Serve hot.',
+        ingredients: [
+          { name: 'Spaghetti', measure: '400g' },
+          { name: 'Eggs', measure: '4' },
+          { name: 'Parmesan', measure: '100g' },
+          { name: 'Pancetta', measure: '200g' }
+        ],
+        source: 'https://example.com/carbonara',
+        youtube: ''
+      },
+      {
+        id: 'mock-2',
+        name: 'Homemade Margherita Pizza',
+        image: 'https://images.unsplash.com/photo-1574071318508-1cdbab80d002?w=600',
+        category: 'Italian',
+        area: 'Italian',
+        instructions: 'Make dough, add tomato sauce, mozzarella, and fresh basil. Bake at 475°F.',
+        ingredients: [
+          { name: 'Pizza dough', measure: '1 ball' },
+          { name: 'Tomato sauce', measure: '1 cup' },
+          { name: 'Mozzarella', measure: '200g' },
+          { name: 'Fresh basil', measure: '10 leaves' }
+        ],
+        source: 'https://example.com/pizza',
+        youtube: ''
+      }
+    ],
+    mexican: [
+      {
+        id: 'mock-3',
+        name: 'Authentic Chicken Tacos',
+        image: 'https://images.unsplash.com/photo-1565299585323-38174c37b73a?w=600',
+        category: 'Mexican',
+        area: 'Mexican',
+        instructions: 'Season and cook chicken, warm tortillas, add toppings. Serve with lime.',
+        ingredients: [
+          { name: 'Chicken breast', measure: '500g' },
+          { name: 'Corn tortillas', measure: '8' },
+          { name: 'Onion', measure: '1' },
+          { name: 'Cilantro', measure: '1/4 cup' },
+          { name: 'Lime', measure: '2' }
+        ],
+        source: 'https://example.com/tacos',
+        youtube: ''
+      },
+      {
+        id: 'mock-4',
+        name: 'Homemade Guacamole',
+        image: 'https://images.unsplash.com/photo-1588168333986-5078d3ae3976?w=600',
+        category: 'Mexican',
+        area: 'Mexican',
+        instructions: 'Mash avocados, mix with lime, onion, cilantro, and salt. Serve immediately.',
+        ingredients: [
+          { name: 'Avocados', measure: '3' },
+          { name: 'Lime', measure: '1' },
+          { name: 'Red onion', measure: '1/4 cup' },
+          { name: 'Cilantro', measure: '2 tbsp' },
+          { name: 'Salt', measure: 'to taste' }
+        ],
+        source: 'https://example.com/guacamole',
+        youtube: ''
+      }
+    ],
+    indian: [
+      {
+        id: 'mock-5',
+        name: 'Butter Chicken (Murgh Makhani)',
+        image: 'https://images.unsplash.com/photo-1563379091339-03246963d29b?w=600',
+        category: 'Indian',
+        area: 'Indian',
+        instructions: 'Marinate chicken, cook with spices, add tomato sauce and cream. Serve with rice.',
+        ingredients: [
+          { name: 'Chicken', measure: '500g' },
+          { name: 'Yogurt', measure: '1/2 cup' },
+          { name: 'Tomato sauce', measure: '1 cup' },
+          { name: 'Heavy cream', measure: '1/2 cup' },
+          { name: 'Garam masala', measure: '1 tbsp' }
+        ],
+        source: 'https://example.com/butter-chicken',
+        youtube: ''
+      }
+    ],
+    default: [
+      {
+        id: 'mock-6',
+        name: 'Classic Burger',
+        image: 'https://images.unsplash.com/photo-1568901346375-23c9450c58cd?w=600',
+        category: 'American',
+        area: 'American',
+        instructions: 'Form patties, grill to desired doneness, assemble with bun and toppings.',
+        ingredients: [
+          { name: 'Ground beef', measure: '500g' },
+          { name: 'Burger buns', measure: '4' },
+          { name: 'Lettuce', measure: '4 leaves' },
+          { name: 'Tomato', measure: '1' },
+          { name: 'Cheese', measure: '4 slices' }
+        ],
+        source: 'https://example.com/burger',
+        youtube: ''
+      },
+      {
+        id: 'mock-7',
+        name: 'Grilled Salmon',
+        image: 'https://images.unsplash.com/photo-1467003909585-2f8a72700288?w=600',
+        category: 'Main Course',
+        area: 'International',
+        instructions: 'Season salmon, grill for 4-5 minutes per side. Serve with vegetables.',
+        ingredients: [
+          { name: 'Salmon fillets', measure: '4' },
+          { name: 'Lemon', measure: '1' },
+          { name: 'Olive oil', measure: '2 tbsp' },
+          { name: 'Salt and pepper', measure: 'to taste' }
+        ],
+        source: 'https://example.com/salmon',
+        youtube: ''
+      }
+    ]
+  }
+
+  const cuisineLower = cuisine.toLowerCase()
+  if (mockRecipes[cuisineLower]) {
+    return mockRecipes[cuisineLower]
+  }
+  return mockRecipes.default
 }
 
